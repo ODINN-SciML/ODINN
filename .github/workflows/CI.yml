@@ -1,14 +1,12 @@
 name: Run Tests
 on:
-   pull_request:
+  pull_request:
     branches:
       - main
-   push:
+  push:
     branches: []
     tags: '*'
 concurrency:
-  # Skip intermediate builds: always.
-  # Cancel intermediate builds: only if it is a pull request build.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
 jobs:
@@ -16,70 +14,83 @@ jobs:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - ${{ github.event_name }}
     runs-on: ${{ matrix.os }}
     defaults:
-       run:
-         shell: bash -el {0}
+      run:
+        shell: bash -el {0}
     strategy:
       fail-fast: false
       matrix:
         version:
-          - '1.9'
-        python: [3.9]
-        os:
-          - ubuntu-latest
+          - '1.10'
+        python:
+          - '3.10'
+        os: [ubuntu-latest, macos-latest]
         arch:
           - x64
     steps:
-      - uses: actions/checkout@v2
+      - name: Cancel ongoing test runs for previous commits
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+      - uses: actions/checkout@v4
       - name: Set up Python 🐍 ${{ matrix.python }}
         uses: actions/setup-python@v2
         with:
-          python-version: ${{ matrix.python }}  
-      - name: Create environment with micromamba 🐍🖤
-        uses: mamba-org/setup-micromamba@v1
-        with: 
-          micromamba-version: '1.5.6-0'
-          environment-file: ./environment.yml
-          environment-name: oggm_env                # it is recommendable to add both name and yml file. 
-          init-shell: bash
-          cache-environment: true
-#           condarc-file: ./condarc.yml                # If necessary, we can include .condarc to configure environment
-      - name: Test creation of environment with micromamba 🔧🐍🖤
-        run: | 
-            which python
-            conda env export
-        shell: bash -el {0}
-      - name: Update certifi
-        run: | 
-            pip install --upgrade certifi
-        shell: bash -el {0}
-#       - name: Test OGGM installation 🔧🌎 
-#         run: pytest.oggm
-#         shell: bash -el {0}
-      - name: Set ENV Variables for PyCall.jl 🐍 📞
-        run: export PYTHON=/home/runner/micromamba/envs/oggm_env/bin/python
-        shell: bash -el {0}
-      - uses: julia-actions/setup-julia@v1
+          python-version: ${{ matrix.python }}
+      - name: Install certifi and set SSL_CERT_FILE
+        run: |
+          pip install --upgrade certifi
+          echo "SSL_CERT_FILE=$(python -c 'import certifi; print(certifi.where())')" >> $GITHUB_ENV
+      - uses: julia-actions/setup-julia@latest
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - name: Check Julia SSL certifications 🔎🔐
         run: julia -e 'using NetworkOptions; println(NetworkOptions.bundled_ca_roots()); println(NetworkOptions.ca_roots())'
-        shell: bash -el {0}
-      - uses: julia-actions/cache@v1
+      - name: Install dependencies on Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxml2 libxml2-dev libspatialite7 libspatialite-dev
+          export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+      - name: Install dependencies on macOS
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install libxml2 libspatialite
+          export PKG_CONFIG_PATH="/usr/local/opt/libxml2/lib/pkgconfig"
+      - name: Debug library information on Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+          ldconfig -p | grep libxml
+          ldconfig -p | grep libspatialite
+          ldd $(find /usr/lib -name "libspatialite.so*" | head -n 1) || true
+          ldd $(find /home/runner/work/Sleipnir.jl/Sleipnir.jl/.CondaPkg/env/lib -name "libspatialite.so*" | head -n 1) || true
+          pkg-config --modversion libxml-2.0
+          pkg-config --modversion spatialite
+      - name: Set up Conda environment with CondaPkg.jl
+        run: julia --project=. -e 'using CondaPkg; CondaPkg.instantiate()'
+      - uses: julia-actions/cache@v2
         with:
           cache-registries: "true"
           cache-compiled: "true"
+      - uses: actions/cache@v4
+        env:
+          cache-name: cache-artifacts
+        with:
+          path: ~/.julia/artifacts
+          key: ${{ runner.os }}-test-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-test-${{ env.cache-name }}-
+            ${{ runner.os }}-test-
+            ${{ runner.os }}-
       - uses: julia-actions/julia-buildpkg@v1
         env:
-          PYTHON : /home/runner/micromamba/envs/oggm_env/bin/python
-          # The SSL certificate path can be readed from the action "Check Julia SSL certifications"
-          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
-      - uses: julia-actions/julia-runtest@v1
+          JULIA_SSL_CA_ROOTS_PATH: ""
+      - uses: julia-actions/julia-runtest@latest
         env:
-          PYTHON : /home/runner/micromamba/envs/oggm_env/bin/python
-          SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+          JULIA_SSL_CA_ROOTS_PATH: ""
       - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v3
+      - uses: codecov/codecov-action@v4
         with:
           token: ${{secrets.CODECOV_TOKEN}}
           files: lcov.info
